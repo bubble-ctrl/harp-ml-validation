@@ -431,7 +431,21 @@ def train_bad_scope(epochs=2):
         "smell_type": "gnc",
         "expected_stage1": "GENUINE",
         "expected_validator": "REGRESSION",
-        "before": "Same as GNC_001",
+        "before": """
+def train_resnet(epochs=2):
+    model = models.resnet50(pretrained=True)
+    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    criterion = nn.CrossEntropyLoss()
+    train_loader = [(torch.randn(4,3,224,224), torch.randint(0,1000,(4,))) for _ in range(10)]
+    model.train()
+    for epoch in range(epochs):
+        for images, labels in train_loader:
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+    return model
+""",
         "after_correct": "",
         "after_wrong": """
 def train_bad_order(epochs=2):
@@ -458,7 +472,21 @@ def train_bad_order(epochs=2):
         "smell_type": "gnc",
         "expected_stage1": "GENUINE",
         "expected_validator": "REGRESSION",
-        "before": "Same as GNC_001",
+        "before": """
+def train_resnet(epochs=2):
+    model = models.resnet50(pretrained=True)
+    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    criterion = nn.CrossEntropyLoss()
+    train_loader = [(torch.randn(4,3,224,224), torch.randint(0,1000,(4,))) for _ in range(10)]
+    model.train()
+    for epoch in range(epochs):
+        for images, labels in train_loader:
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+    return model
+""",
         "after_wrong": """
 def train_conditional_zg(epochs=2):
     model = models.resnet50(pretrained=True)
@@ -1008,22 +1036,34 @@ def merge_duplicate_cols():
     },
 
     "MERGE_012": {
-        "description": "False Positive: Merge with 'how' explicitly set, but 'on' is implicit (single common column).",
-        "reasoning": "The smell definition flags missing 'on', but if there's only one common column, pandas handles it. "
-                     "Stage1 might flag it, but validator can confirm structure is fine.",
-        "smell_type": "merge",
-        "expected_stage1": "NO_SMELL",
-        "expected_validator": "NO_SMELL",
-        "before": """
+    "description": "Genuine smell: Merge with 'how' explicitly set, but 'on' is implicit (single common column). "
+                   "HARP‑ML requires explicit 'on' (or left_on/right_on) for clarity.",
+    "reasoning": "The smell definition flags missing 'on' – even if there's only one common column, explicit 'on' is required.",
+    "smell_type": "merge",
+    "expected_stage1": "GENUINE",      # Changed from NO_SMELL
+    "expected_validator": "VALIDATED", # Assuming correct refactoring would add on and validate
+    "before": """
 def implicit_on_merge():
     df1 = pd.DataFrame({'id': [1,2], 'val': [10,20]})
     df2 = pd.DataFrame({'id': [1,3], 'val2': [100,200]})
     result = df1.merge(df2, how='inner')
     return result
 """,
-        "after_correct": "",
-        "after_wrong": "",
-    },
+    "after_correct": """
+def implicit_on_merge_fixed():
+    df1 = pd.DataFrame({'id': [1,2], 'val': [10,20]})
+    df2 = pd.DataFrame({'id': [1,3], 'val2': [100,200]})
+    result = df1.merge(df2, on='id', how='inner', validate='one_to_one')
+    return result
+""",
+    "after_wrong": """
+def implicit_on_merge_wrong():
+    df1 = pd.DataFrame({'id': [1,2], 'val': [10,20]})
+    df2 = pd.DataFrame({'id': [1,3], 'val2': [100,200]})
+    result = df1.merge(df2, left_on='wrong', right_on='wrong', how='inner')
+    return result
+"""
+},
 
     "MERGE_013": {
         "description": "Genuine smell: Merging a large DataFrame with itself (self-join) missing validate.",
@@ -1137,21 +1177,34 @@ def merge_preserve_all():
     },
 
     "MERGE_017": {
-        "description": "False Positive: Merge with 'validate' present but 'how' implicit (pandas default inner).",
-        "reasoning": "Structure is mostly explicit. Could be considered a weak smell, but validation should skip if 'on' exists.",
-        "smell_type": "merge",
-        "expected_stage1": "NO_SMELL",
-        "expected_validator": "NO_SMELL",
-        "before": """
+    "description": "Genuine smell: Merge with 'validate' present but 'how' implicit (pandas default inner). "
+                   "HARP‑ML requires explicit 'how' even if default is inner.",
+    "reasoning": "Structure is partially explicit, but missing 'how' – so it's a smell.",
+    "smell_type": "merge",
+    "expected_stage1": "GENUINE",      # Changed from NO_SMELL
+    "expected_validator": "VALIDATED",
+    "before": """
 def merge_validate_only():
     df1 = pd.DataFrame({'id': [1,2], 'col': ['a','b']})
     df2 = pd.DataFrame({'id': [1,2], 'col2': ['c','d']})
     result = df1.merge(df2, on='id', validate='one_to_one')
     return result
 """,
-        "after_correct": "",
-        "after_wrong": "",
-    },
+    "after_correct": """
+def merge_validate_only_fixed():
+    df1 = pd.DataFrame({'id': [1,2], 'col': ['a','b']})
+    df2 = pd.DataFrame({'id': [1,2], 'col2': ['c','d']})
+    result = df1.merge(df2, on='id', how='inner', validate='one_to_one')
+    return result
+""",
+    "after_wrong": """
+def merge_validate_only_wrong():
+    df1 = pd.DataFrame({'id': [1,2], 'col': ['a','b']})
+    df2 = pd.DataFrame({'id': [1,2], 'col2': ['c','d']})
+    result = df1.merge(df2, left_on='id', right_on='wrong', how='inner')
+    return result
+"""
+},
 
     "MERGE_018": {
         "description": "Genuine smell: Merging with indicator flag (to track left/right) but missing core params.",
