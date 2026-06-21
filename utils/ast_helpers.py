@@ -6,6 +6,35 @@ import ast
 import pandas as pd
 
 
+_VALIDATE_ALIASES = {"1:1": "one_to_one", "1:m": "one_to_many",
+                     "m:1": "many_to_one", "m:m": "many_to_many"}
+
+
+def extract_merge_spec(code: str) -> dict:
+    """Extract literal merge parameters for structural contract comparison."""
+    tree = ast.parse(code)
+    call = next((node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == "merge"), None)
+    if call is None:
+        raise ValueError("No DataFrame.merge call found.")
+    values = {}
+    for kw in call.keywords:
+        if kw.arg is None:
+            continue
+        try:
+            values[kw.arg] = ast.literal_eval(kw.value)
+        except (ValueError, TypeError):
+            values[kw.arg] = None
+    if "on" in values:
+        values["left_on"] = values["right_on"] = values["on"]
+    values["how"] = values.get("how", "inner")
+    values["validate"] = _VALIDATE_ALIASES.get(values.get("validate"), values.get("validate"))
+    values["explicit_on"] = "on" in values or ("left_on" in values and "right_on" in values)
+    values["explicit_how"] = "how" in {kw.arg for kw in call.keywords}
+    values["explicit_validate"] = "validate" in values
+    return values
+
+
 def extract_function(code: str, func_name: str = None) -> callable:
     """Extract the first function from a code string and execute it."""
     if func_name is None:
@@ -85,7 +114,12 @@ def structural_merge_check(code: str) -> bool:
                 seen_on = any(k in kwargs for k in ("on", "left_on", "right_on"))
                 seen_how = "how" in kwargs
                 seen_validate = "validate" in kwargs
-                seen_index = kwargs.get("left_index", False) and kwargs.get("right_index", False)
+                seen_index = (
+                    isinstance(kwargs.get("left_index"), ast.Constant)
+                    and kwargs["left_index"].value is True
+                    and isinstance(kwargs.get("right_index"), ast.Constant)
+                    and kwargs["right_index"].value is True
+                )
 
                 # Index merges are valid (explicit)
                 if seen_index:

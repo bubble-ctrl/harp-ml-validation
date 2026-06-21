@@ -843,6 +843,7 @@ def merge_composite():
 def merge_time_series():
     ts1 = pd.DataFrame({'date': ['2024-01-01','2024-01-02'], 'value1': [1,2]})
     ts2 = pd.DataFrame({'date': ['2024-01-02','2024-01-03'], 'value2': [3,4]})
+    # Intent: retain the complete union of timestamps from both time series.
     result = ts1.merge(ts2, on='date')
     return result
 """,
@@ -962,7 +963,7 @@ def merge_overlap():
 def merge_overlap():
     left = pd.DataFrame({'id': [1,2], 'col': ['a','b']})
     right = pd.DataFrame({'id': [1,2], 'col': ['c','d']})
-    result = left.merge(right, on='id', suffixes=('_left', '_right'))
+    result = left.merge(right, on='id', how='inner', suffixes=('_left', '_right'), validate='one_to_one')
     return result
 """,
         "after_wrong": """
@@ -976,30 +977,29 @@ def merge_overlap():
     },
 
     "MERGE_010": {
-        "description": "Genuine smell: Merging on a column that needs type conversion (context indicates casting).",
-        "reasoning": "Tests if SLM-2 can infer that 'id' needs to be converted to int/string.",
+        "description": "Genuine smell: Asymmetric key names with compatible string identifiers.",
+        "reasoning": "Tests whether SLM-2 recovers uid/user_id without mixing type conversion into the merge-parameter smell.",
         "smell_type": "merge",
         "expected_stage1": "GENUINE",
         "expected_validator": "VALIDATED",
         "before": """
 def merge_type_mismatch():
     users = pd.DataFrame({'uid': ['1','2','3'], 'name': ['A','B','C']})
-    orders = pd.DataFrame({'user_id': [1,2], 'amt': [10,20]})
+    orders = pd.DataFrame({'user_id': ['1','2'], 'amt': [10,20]})
     result = users.merge(orders, left_on='uid', right_on='user_id')
     return result
 """,
         "after_correct": """
 def merge_type_mismatch():
     users = pd.DataFrame({'uid': ['1','2','3'], 'name': ['A','B','C']})
-    orders = pd.DataFrame({'user_id': [1,2], 'amt': [10,20]})
-    # Correct: explicit cast in context? Actually, pandas handles mixed types via object.
+    orders = pd.DataFrame({'user_id': ['1','2'], 'amt': [10,20]})
     result = users.merge(orders, left_on='uid', right_on='user_id', how='inner', validate='one_to_one')
     return result
 """,
         "after_wrong": """
 def merge_type_mismatch():
     users = pd.DataFrame({'uid': ['1','2','3'], 'name': ['A','B','C']})
-    orders = pd.DataFrame({'user_id': [1,2], 'amt': [10,20]})
+    orders = pd.DataFrame({'user_id': ['1','2'], 'amt': [10,20]})
     # WRONG: guesses on='id' when neither side has that column
     result = users.merge(orders, left_on='id', right_on='id', how='inner', validate='one_to_one')
     return result
@@ -1023,7 +1023,7 @@ def merge_duplicate_cols():
 def merge_duplicate_cols():
     df1 = pd.DataFrame({'key': [1,2], 'date': ['2020-01-01','2020-01-02']})
     df2 = pd.DataFrame({'key': [1,2], 'date': ['2020-01-01','2020-01-02']})
-    result = df1.merge(df2, on='key', suffixes=('_x', '_y'), validate='one_to_one')
+    result = df1.merge(df2, on='key', how='inner', suffixes=('_x', '_y'), validate='one_to_one')
     return result
 """,
         "after_wrong": """
@@ -1287,7 +1287,7 @@ def merge_multiindex():
     cols2 = pd.MultiIndex.from_tuples([('B','x'), ('B','z')])
     df1 = pd.DataFrame([[1,2]], columns=cols1)
     df2 = pd.DataFrame([[1,3]], columns=cols2)
-    result = df1.merge(df2, left_on=[('A','x')], right_on=[('B','x')], how='inner')
+    result = df1.merge(df2, left_on=[('A','x')], right_on=[('B','x')], how='inner', validate='one_to_one')
     return result
 """,
         "after_wrong": """

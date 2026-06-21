@@ -7,8 +7,8 @@ from enum import Enum
 from typing import Optional
 
 from models.slm2_merge_contract import infer_contract
-from validators.merge.merge_pbt_runner import run_pbt
-from utils.ast_helpers import structural_merge_check, extract_function
+from validators.merge.merge_pbt_runner import extract_merge_callable, run_pbt
+from utils.ast_helpers import extract_merge_spec, structural_merge_check
 
 
 class MergeVerdict(str, Enum):
@@ -46,9 +46,44 @@ def validate_merge(original_code: str, refactored_code: str) -> MergeValidatorRe
             confidence="LOW"
         )
 
-    # Run PBT
+    # Structural comparison comes before execution. The desired contract was
+    # inferred independently; the candidate is not allowed to redefine it.
     try:
-        func = extract_function(refactored_code)
+        spec = extract_merge_spec(refactored_code)
+    except (SyntaxError, ValueError) as exc:
+        return MergeValidatorResult(
+            verdict=MergeVerdict.EXEC_ERROR,
+            contract=contract,
+            summary=f"Candidate cannot be analyzed: {exc}",
+            confidence="LOW",
+        )
+
+    mismatches = []
+    if not spec.get("explicit_on"):
+        mismatches.append("join keys are not explicit")
+    if not spec.get("explicit_how"):
+        mismatches.append("how is not explicit")
+    if not spec.get("explicit_validate"):
+        mismatches.append("validate is not explicit")
+    for field in ("how", "left_on", "right_on", "validate"):
+        expected = contract.get(field)
+        actual = spec.get(field)
+        if expected not in (None, "unknown") and actual != expected:
+            mismatches.append(f"{field}: expected {expected!r}, got {actual!r}")
+    if contract.get("suffixes_required") and "suffixes" not in spec:
+        mismatches.append("explicit suffixes are required for overlapping columns")
+    if mismatches:
+        return MergeValidatorResult(
+            verdict=MergeVerdict.REGRESSION,
+            contract=contract,
+            pbt_passed=False,
+            summary="Structural contract mismatch: " + "; ".join(mismatches),
+            confidence=contract.get("confidence", "medium"),
+        )
+
+    # PBT executes an isolated merge expression with injected DataFrames.
+    try:
+        func = extract_merge_callable(refactored_code)
         pbt_passed, msg = run_pbt(func, contract, original_code, runs=100)
     except Exception as e:
         return MergeValidatorResult(

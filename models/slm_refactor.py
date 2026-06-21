@@ -5,6 +5,7 @@ Optimized for DeepSeek-Coder-6.7B-Instruct with fallback heuristic processors
 to handle tokenization collapse (stripped spaces) or placeholder hallucinations.
 """
 
+import ast
 import re
 import torch
 from dataclasses import dataclass
@@ -57,34 +58,86 @@ def heuristic_fix_gnc(code: str) -> str:
 
 
 def heuristic_fix_merge(code: str) -> str:
-    """Fallback compiler to cleanly expand Pandas merge calls if the SLM fails."""
-    lines = code.splitlines()
-    fixed_lines = []
-    
-    # If parameters already look present, keep code as is
-    if any(param in code for param in ["on=", "how=", "validate="]):
-        return code
+    """Deprecated: guessing merge semantics is unsafe for a Type-II smell."""
+    return code
 
-    for line in lines:
-        if ".merge(" in line:
-            # Check for standard df1.merge(df2) pattern
-            match = re.search(r"(\w+)\s*=\s*(\w+)\.merge\((\w+)\)", line)
-            if match:
-                res_var, df1, df2 = match.groups()
-                indent = len(line) - len(line.lstrip())
-                ind = " " * indent
-                fixed_lines.append(
-                    f"{ind}{res_var} = {df1}.merge(\n"
-                    f"{ind}    {df2},\n"
-                    f"{ind}    on=None,\n"
-                    f"{ind}    how='inner',\n"
-                    f"{ind}    validate='many_to_one'\n"
-                    f"{ind})"
-                )
+
+_MERGE_KEYWORDS = {
+    "on", "left_on", "right_on", "left_index", "right_index", "how",
+    "validate", "suffixes", "sort", "indicator", "copy",
+}
+
+
+def _first_merge(tree: ast.AST) -> Optional[ast.Call]:
+    return next((node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == "merge"), None)
+
+
+def _extract_python_candidate(response: str) -> Optional[str]:
+    """Return the first parseable Python candidate from an SLM response."""
+    candidates = re.findall(r"```(?:python)?\s*\n?(.*?)```", response, re.DOTALL | re.IGNORECASE)
+    candidates.append(response.strip())
+    lines = response.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("def "):
+            block = [line]
+            for following in lines[i + 1:]:
+                if not following.strip() or following[:1].isspace():
+                    block.append(following)
+                else:
+                    break
+            candidates.append("\n".join(block))
+    ranked = []
+    for candidate in candidates:
+        try:
+            tree = ast.parse(candidate)
+            merge = _first_merge(tree)
+            if merge is None:
                 continue
-        fixed_lines.append(line)
-        
-    return "\n".join(fixed_lines)
+            names = {kw.arg for kw in merge.keywords}
+            score = sum(name in names for name in ("on", "left_on", "right_on", "how", "validate"))
+            ranked.append((score, candidate))
+        except SyntaxError:
+            continue
+    return max(ranked, key=lambda item: item[0])[1] if ranked else None
+
+
+def _safe_merge_transplant(original_code: str, candidate_code: str) -> tuple[Optional[str], Optional[str]]:
+    """Apply only model-selected merge keyword arguments to the original AST.
+
+    This prevents an otherwise parseable hallucination (for example
+    ``pders.DataFrame``) from silently changing unrelated program behavior.
+    """
+    try:
+        original_tree = ast.parse(original_code)
+        candidate_tree = ast.parse(candidate_code)
+    except SyntaxError as exc:
+        return None, f"Generated code is not valid Python: {exc}"
+    original_merge = _first_merge(original_tree)
+    candidate_merge = _first_merge(candidate_tree)
+    if original_merge is None or candidate_merge is None:
+        return None, "Generated code does not contain the target merge call."
+
+    candidate_kwargs = {kw.arg: kw for kw in candidate_merge.keywords if kw.arg in _MERGE_KEYWORDS}
+    has_keys = "on" in candidate_kwargs or ({"left_on", "right_on"} <= set(candidate_kwargs))
+    if not has_keys or "how" not in candidate_kwargs or "validate" not in candidate_kwargs:
+        return None, "Generated merge must explicitly set keys, how, and validate."
+    for name, keyword in candidate_kwargs.items():
+        try:
+            ast.literal_eval(keyword.value)
+        except (ValueError, TypeError):
+            return None, f"Generated {name} must be a literal value."
+
+    existing = {kw.arg: kw for kw in original_merge.keywords if kw.arg is not None}
+    if "on" in candidate_kwargs:
+        existing.pop("left_on", None)
+        existing.pop("right_on", None)
+    else:
+        existing.pop("on", None)
+    existing.update(candidate_kwargs)
+    original_merge.keywords = list(existing.values())
+    ast.fix_missing_locations(original_tree)
+    return ast.unparse(original_tree), None
 
 
 # --------------------------------------------------------------------
@@ -133,9 +186,9 @@ Code window to fix:
 # Model inference
 # --------------------------------------------------------------------
 
-def query_model(prompt: str, max_new_tokens: int = 512) -> str:
+def query_model(prompt: str, max_new_tokens: int = 512, component: str = "SLM-1") -> str:
     """Run locally (CPU/GPU) with structured configurations."""
-    print("[SLM‑1] Running inference using DeepSeek Engine...")
+    print(f"[{component}] Running inference using DeepSeek Engine...")
     return _query_local(prompt, max_new_tokens)
 
 
@@ -202,11 +255,14 @@ def parse_gnc_response(response: str, original_code: str) -> RefactorResult:
 
 
 def parse_merge_response(response: str, original_code: str) -> RefactorResult:
-    # 1. Clean up response headers
-    clean_res = response.replace("```python", "").replace("```", "").strip()
+    # Never execute the model's entire program. Extract its merge decision and
+    # transplant only those API keywords onto the original program.
+    clean_res = _extract_python_candidate(response)
+    print(f"  [DEBUG:parse_merge] Raw response length: {len(response)}")
+    print(f"  [DEBUG:parse_merge] Candidate found: {clean_res is not None}")
 
     # 2. Check for False Positive signals
-    if "FALSE POSITIVE" in clean_res.upper():
+    if "FALSE POSITIVE" in response.upper():
         return RefactorResult(
             success=True,
             refactored_code=original_code,
@@ -214,25 +270,15 @@ def parse_merge_response(response: str, original_code: str) -> RefactorResult:
             is_false_positive=True
         )
 
-    # 3. Detect and repair spacing collapse or placeholders
-    collapsed_whitespace = ".merge(" not in clean_res or "df.merge" in clean_res.replace(" ", "")
-    contains_placeholder = "oneclearsentence" in clean_res.lower()
-
-    if collapsed_whitespace or contains_placeholder or not clean_res:
-        # Trigger heuristic failsafe logic
-        fixed = heuristic_fix_merge(original_code)
-        return RefactorResult(
-            success=True,
-            refactored_code=fixed,
-            reasoning="Configured explicit on, how, and validate attributes to stabilize join schemas.",
-            is_false_positive=False
-        )
-
-    # 4. Standard parsed route
+    if clean_res is None:
+        return RefactorResult(False, original_code, "", error="SLM output contains no parseable Python code.")
+    safe_code, error = _safe_merge_transplant(original_code, clean_res)
+    if error:
+        return RefactorResult(False, original_code, "", error=error)
     return RefactorResult(
         success=True,
-        refactored_code=clean_res,
-        reasoning="Refactored merge API call with explicit mapping schemas.",
+        refactored_code=safe_code or original_code,
+        reasoning="Applied only the SLM-selected merge parameters to the unchanged original program.",
         is_false_positive=False
     )
 

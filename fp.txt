@@ -1,0 +1,41 @@
+python3 -c "
+import sys
+sys.path.insert(0, '.')
+from data.manual_test_dataset import TEST_CASES
+from validators.gnc.stage1_intent import check_intentionality
+from utils.ast_helpers import structural_merge_check
+
+correct = 0
+total = 0
+
+print(f"{'Case':<20} {'Type':<6} {'Expected':<12} {'Got':<12} {'Pass':<4}")
+print('-' * 60)
+
+for case_id, case in TEST_CASES.items():
+    before = case['before']
+    expected = case['expected_stage1']
+    smell = case.get('smell_type')
+    
+    if smell == 'gnc':
+        result = check_intentionality(before)
+        got = result.verdict.value
+    elif smell == 'merge':
+        got = 'NO_SMELL' if structural_merge_check(before) else 'GENUINE'
+    else:
+        continue
+    
+    total += 1
+    passed = (got == expected)
+    if passed:
+        correct += 1
+    else:
+        print(f'{case_id:<20} {smell:<6} {expected:<12} {got:<12} ❌')
+        # Optionally print the reasoning for GNC
+        if smell == 'gnc':
+            print(f'    Reason: {result.reason[:60]}...')
+    if passed:
+        print(f'{case_id:<20} {smell:<6} {expected:<12} {got:<12} ✅')
+
+print('-' * 60)
+print(f'\n✅ Stage 1 accuracy: {correct}/{total} ({correct/total*100:.1f}%)')
+"

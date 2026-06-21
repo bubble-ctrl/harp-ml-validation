@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Optional
 
 from validators.gnc.stage1_intent import check_intentionality, Verdict as IntentVerdict
-from stage4_differential import compare_snippets, DiffVerdict
+from validators.gnc.stage4_differential import compare_snippets, DiffVerdict
 
 
 class FinalVerdict(str, Enum):
@@ -37,8 +37,8 @@ class FinalVerdict(str, Enum):
 
 @dataclass
 class ValidatorResult:
-    verdict:    FinalVerdict
-    summary:    str
+    verdict:    FinalVerdict = FinalVerdict.INCONCLUSIVE   # default
+    summary:    str = ""                                   # default
     confidence: str = ""          # HIGH | MEDIUM | LOW
 
     # Stage 1
